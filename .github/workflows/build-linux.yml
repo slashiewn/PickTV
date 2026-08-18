@@ -1,0 +1,214 @@
+name: Build for Linux
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        java-version: ['21']
+        gradle-version: ['8.x']
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: 'temurin'
+          cache: gradle
+      
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+      
+      - name: Validate Gradle wrapper
+        uses: gradle/wrapper-validation-action@v2
+      
+      - name: Build with Gradle
+        run: |
+          ./gradlew clean build \
+            -PbuildDir=build \
+            --no-daemon \
+            --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx2048m -Dorg.gradle.jvmargs=-Xmx2048m"
+      
+      - name: Check build outputs
+        run: |
+          echo "Build completed successfully"
+          find . -name "*.apk" -type f
+      
+      - name: Create Release directory
+        run: mkdir -p Release/apk
+      
+      - name: Copy APK files to Release
+        run: |
+          if [ -d "app/build/outputs/apk" ]; then
+            find app/build/outputs/apk -name "*.apk" -exec cp {} Release/apk/ \;
+          fi
+      
+      - name: List Release artifacts
+        run: |
+          echo "Release artifacts:"
+          ls -lah Release/apk/ || echo "No APK files found"
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts-${{ matrix.java-version }}-${{ github.run_number }}
+          path: |
+            app/build/outputs/
+            Release/apk/
+          retention-days: 30
+          if-no-files-found: warn
+      
+      - name: Generate build report
+        if: always()
+        run: |
+          cat > build-report.txt << 'EOF'
+          Build Report
+          ============
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref }}
+          Commit: ${{ github.sha }}
+          Java Version: ${{ matrix.java-version }}
+          Build Status: ${{ job.status }}
+          Build Number: ${{ github.run_number }}
+          Timestamp: $(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          EOF
+          cat build-report.txt
+      
+      - name: Upload build report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-report-${{ github.run_number }}
+          path: build-report.txt
+          retention-days: 30
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
+      
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+      
+      - name: Run Lint checks
+        run: ./gradlew lint --no-daemon --stacktrace
+        continue-on-error: true
+      
+      - name: Upload Lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-results
+          path: app/build/reports/lint-results*.html
+          if-no-files-found: ignore
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
+      
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+      
+      - name: Run Unit Tests
+        run: ./gradlew test --no-daemon --stacktrace
+        continue-on-error: true
+      
+      - name: Upload Test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+
+  publish-release:
+    needs: [build, lint, test]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
+      
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+      
+      - name: Build Release APKs
+        run: ./gradlew clean assembleRelease --no-daemon --stacktrace
+      
+      - name: Download artifacts from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts-21-${{ github.run_number }}
+          path: artifacts/
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            Release/apk/*.apk
+            artifacts/app/build/outputs/apk/**/*.apk
+          draft: false
+          prerelease: false
+          body: |
+            # Release Notes
+            
+            Build triggered by tag: ${{ github.ref }}
+            Commit: ${{ github.sha }}
+            
+            ## Build Artifacts
+            
+            - APK files for Android TV applications
+            - Multiple ABI variants (arm64-v8a, armeabi-v7a)
+            - Both Leanback and Mobile modes
+            
+            Please refer to the project README for installation instructions.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
